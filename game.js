@@ -1,14 +1,6 @@
 /* ===========================================
    GEM GARDEN - Match 3 Puzzle Game Logic
-   ===========================================
-
-   This file contains all the game mechanics:
-   - Grid representation and initialization
-   - Match detection (3+ in a row/column)
-   - Gem removal and gravity
-   - Score tracking
-   - User interaction handling
-
+   With Level System
    =========================================== */
 
 // ===========================================
@@ -16,25 +8,34 @@
 // ===========================================
 
 const CONFIG = {
-    ROWS: 8,              // Number of rows in the grid
-    COLS: 8,              // Number of columns in the grid
-    NUM_GEM_TYPES: 6,     // Number of different gem colors
-    POINTS_PER_GEM: 10,   // Base points for each matched gem
-    ANIMATION_DELAY: 300, // Milliseconds for animations
+    ROWS: 8,
+    COLS: 8,
+    NUM_GEM_TYPES: 6,
+    POINTS_PER_GEM: 10,
+    ANIMATION_DELAY: 300,
+    STORAGE_KEY: 'gemGardenProgress'
 };
 
-// Gem symbols for display (using emoji for visual appeal)
 const GEM_SYMBOLS = ['💎', '🔷', '💚', '⭐', '🔮', '🧡'];
+const GEM_NAMES = ['Ruby', 'Sapphire', 'Emerald', 'Topaz', 'Amethyst', 'Citrine'];
 
 // ===========================================
 // GAME STATE
 // ===========================================
 
-let grid = [];           // 2D array representing the game board
-let score = 0;           // Current player score
-let selectedGem = null;  // Currently selected gem {row, col}
-let isProcessing = false; // Prevents input during animations
-let hintTimeout = null;  // Timer for hint animation
+let grid = [];
+let score = 0;
+let selectedGem = null;
+let isProcessing = false;
+let hintTimeout = null;
+
+// Level System State
+let currentLevel = 1;
+let movesLeft = 20;
+let totalMoves = 20;
+let gemsCollected = {};  // Track collected gems by type
+let totalGemsCollected = 0;
+let levelProgress = {};  // Saved progress: { levelId: { completed: true, stars: 3 } }
 
 // ===========================================
 // DOM ELEMENTS
@@ -43,106 +44,174 @@ let hintTimeout = null;  // Timer for hint animation
 const boardElement = document.getElementById('game-board');
 const scoreElement = document.getElementById('score');
 const statusElement = document.getElementById('game-status');
-const newGameBtn = document.getElementById('new-game-btn');
+const levelElement = document.getElementById('level');
+
+// Goal elements
+const currentScoreEl = document.getElementById('current-score');
+const targetScoreEl = document.getElementById('target-score');
+const movesLeftEl = document.getElementById('moves-left');
+const goalScoreEl = document.getElementById('goal-score');
+const goalMovesEl = document.getElementById('goal-moves');
+const goalGemsEl = document.getElementById('goal-gems');
+const goalGemIconEl = document.getElementById('goal-gem-icon');
+const gemsCollectedEl = document.getElementById('gems-collected');
+const gemsTargetEl = document.getElementById('gems-target');
+
+// Buttons
+const levelsBtn = document.getElementById('levels-btn');
 const hintBtn = document.getElementById('hint-btn');
+const restartBtn = document.getElementById('restart-btn');
+
+// Modals
+const levelCompleteModal = document.getElementById('level-complete-modal');
+const levelFailedModal = document.getElementById('level-failed-modal');
+const levelSelectModal = document.getElementById('level-select-modal');
 
 // ===========================================
 // INITIALIZATION
 // ===========================================
 
-/**
- * Initialize a new game
- * - Creates empty grid
- * - Fills with random gems (avoiding initial matches)
- * - Renders the board
- */
 function initGame() {
-    // Reset game state
+    loadProgress();
+    loadLevel(currentLevel);
+}
+
+function loadLevel(levelId) {
+    const level = LEVELS.find(l => l.id === levelId);
+    if (!level) {
+        console.error('Level not found:', levelId);
+        return;
+    }
+
+    // Reset state
+    currentLevel = levelId;
     score = 0;
+    movesLeft = level.moves;
+    totalMoves = level.moves;
     selectedGem = null;
     isProcessing = false;
+    gemsCollected = { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+    totalGemsCollected = 0;
     clearHint();
 
-    // Update score display
+    // Update UI
+    levelElement.textContent = levelId;
     updateScore(0);
-    setStatus('Match 3 or more gems!');
+    updateGoalsUI(level);
+    setStatus(level.description);
 
-    // Create and fill the grid
+    // Create and render board
     createGrid();
-
-    // Render the board
     renderBoard();
 
-    // Check if there are valid moves (should always be true for new game)
+    // Ensure valid moves exist
     if (!hasValidMoves()) {
         shuffleBoard();
     }
+
+    // Hide any open modals
+    hideAllModals();
 }
 
-/**
- * Create the grid and fill with random gems
- * Ensures no matches exist at the start
- */
+function updateGoalsUI(level) {
+    const goals = level.goals;
+
+    // Score goal
+    if (goals.score) {
+        goalScoreEl.classList.remove('hidden');
+        targetScoreEl.textContent = goals.score;
+        currentScoreEl.textContent = score;
+    } else {
+        goalScoreEl.classList.add('hidden');
+    }
+
+    // Moves display
+    movesLeftEl.textContent = movesLeft;
+
+    // Gem collection goal (primary)
+    if (goals.collectGem) {
+        goalGemsEl.classList.remove('hidden');
+        goalGemIconEl.textContent = GEM_SYMBOLS[goals.collectGem.type];
+        gemsTargetEl.textContent = goals.collectGem.count;
+        gemsCollectedEl.textContent = gemsCollected[goals.collectGem.type] || 0;
+    } else if (goals.collectAny) {
+        goalGemsEl.classList.remove('hidden');
+        goalGemIconEl.textContent = '💎';
+        gemsTargetEl.textContent = goals.collectAny;
+        gemsCollectedEl.textContent = totalGemsCollected;
+    } else {
+        goalGemsEl.classList.add('hidden');
+    }
+}
+
+// ===========================================
+// PROGRESS PERSISTENCE
+// ===========================================
+
+function loadProgress() {
+    try {
+        const saved = localStorage.getItem(CONFIG.STORAGE_KEY);
+        if (saved) {
+            const data = JSON.parse(saved);
+            levelProgress = data.levelProgress || {};
+            currentLevel = data.currentLevel || 1;
+        }
+    } catch (e) {
+        console.warn('Could not load progress:', e);
+    }
+}
+
+function saveProgress() {
+    try {
+        localStorage.setItem(CONFIG.STORAGE_KEY, JSON.stringify({
+            levelProgress,
+            currentLevel
+        }));
+    } catch (e) {
+        console.warn('Could not save progress:', e);
+    }
+}
+
+function isLevelUnlocked(levelId) {
+    if (levelId === 1) return true;
+    // Level is unlocked if previous level is completed
+    return levelProgress[levelId - 1]?.completed === true;
+}
+
+// ===========================================
+// GRID CREATION
+// ===========================================
+
 function createGrid() {
     grid = [];
-
     for (let row = 0; row < CONFIG.ROWS; row++) {
         grid[row] = [];
         for (let col = 0; col < CONFIG.COLS; col++) {
-            // Generate a gem that doesn't create an immediate match
             grid[row][col] = getRandomGemWithoutMatch(row, col);
         }
     }
 }
 
-/**
- * Generate a random gem type that won't create a match at position
- * @param {number} row - Row position
- * @param {number} col - Column position
- * @returns {number} Gem type (0 to NUM_GEM_TYPES-1)
- */
 function getRandomGemWithoutMatch(row, col) {
     let gemType;
     let attempts = 0;
-    const maxAttempts = 100;
 
     do {
         gemType = Math.floor(Math.random() * CONFIG.NUM_GEM_TYPES);
         attempts++;
-
-        // Safety check to prevent infinite loop
-        if (attempts >= maxAttempts) break;
-
+        if (attempts >= 100) break;
     } while (wouldCreateMatch(row, col, gemType));
 
     return gemType;
 }
 
-/**
- * Check if placing a gem would create a match
- * Only checks left and up (since we fill top-to-bottom, left-to-right)
- * @param {number} row - Row position
- * @param {number} col - Column position
- * @param {number} gemType - Type of gem to check
- * @returns {boolean} True if it would create a match
- */
 function wouldCreateMatch(row, col, gemType) {
-    // Check horizontal (2 gems to the left)
-    if (col >= 2) {
-        if (grid[row][col - 1] === gemType &&
-            grid[row][col - 2] === gemType) {
-            return true;
-        }
+    if (col >= 2 && grid[row][col - 1] === gemType && grid[row][col - 2] === gemType) {
+        return true;
     }
-
-    // Check vertical (2 gems above)
-    if (row >= 2) {
-        if (grid[row - 1][col] === gemType &&
-            grid[row - 2][col] === gemType) {
-            return true;
-        }
+    if (row >= 2 && grid[row - 1][col] === gemType && grid[row - 2][col] === gemType) {
+        return true;
     }
-
     return false;
 }
 
@@ -150,13 +219,8 @@ function wouldCreateMatch(row, col, gemType) {
 // RENDERING
 // ===========================================
 
-/**
- * Render the entire game board
- * Creates gem elements for each cell in the grid
- */
 function renderBoard() {
     boardElement.innerHTML = '';
-
     for (let row = 0; row < CONFIG.ROWS; row++) {
         for (let col = 0; col < CONFIG.COLS; col++) {
             const gemElement = createGemElement(row, col);
@@ -165,12 +229,6 @@ function renderBoard() {
     }
 }
 
-/**
- * Create a single gem DOM element
- * @param {number} row - Row position
- * @param {number} col - Column position
- * @returns {HTMLElement} The gem element
- */
 function createGemElement(row, col) {
     const gem = document.createElement('div');
     const gemType = grid[row][col];
@@ -179,34 +237,20 @@ function createGemElement(row, col) {
     gem.dataset.row = row;
     gem.dataset.col = col;
     gem.textContent = GEM_SYMBOLS[gemType];
-
-    // Add click handler
     gem.addEventListener('click', () => handleGemClick(row, col));
 
     return gem;
 }
 
-/**
- * Update a single gem's appearance
- * @param {number} row - Row position
- * @param {number} col - Column position
- */
 function updateGemElement(row, col) {
     const index = row * CONFIG.COLS + col;
     const gemElement = boardElement.children[index];
     const gemType = grid[row][col];
 
-    // Update class and content
     gemElement.className = `gem gem-${gemType}`;
     gemElement.textContent = GEM_SYMBOLS[gemType];
 }
 
-/**
- * Get the DOM element for a specific gem
- * @param {number} row - Row position
- * @param {number} col - Column position
- * @returns {HTMLElement} The gem element
- */
 function getGemElement(row, col) {
     const index = row * CONFIG.COLS + col;
     return boardElement.children[index];
@@ -216,76 +260,44 @@ function getGemElement(row, col) {
 // USER INTERACTION
 // ===========================================
 
-/**
- * Handle when a gem is clicked
- * @param {number} row - Row of clicked gem
- * @param {number} col - Column of clicked gem
- */
 function handleGemClick(row, col) {
-    // Ignore clicks while processing animations
     if (isProcessing) return;
-
-    // Clear any hint animation
     clearHint();
 
     const clickedGem = { row, col };
 
-    // If no gem is selected, select this one
     if (selectedGem === null) {
         selectGem(row, col);
         return;
     }
 
-    // If clicking the same gem, deselect it
     if (selectedGem.row === row && selectedGem.col === col) {
         deselectGem();
         return;
     }
 
-    // Check if the clicked gem is adjacent to selected gem
     if (isAdjacent(selectedGem, clickedGem)) {
-        // Try to swap the gems
         trySwap(selectedGem.row, selectedGem.col, row, col);
     } else {
-        // Not adjacent - select the new gem instead
         deselectGem();
         selectGem(row, col);
     }
 }
 
-/**
- * Check if two positions are adjacent (horizontally or vertically)
- * @param {Object} pos1 - First position {row, col}
- * @param {Object} pos2 - Second position {row, col}
- * @returns {boolean} True if adjacent
- */
 function isAdjacent(pos1, pos2) {
     const rowDiff = Math.abs(pos1.row - pos2.row);
     const colDiff = Math.abs(pos1.col - pos2.col);
-
-    // Adjacent means exactly one step away (not diagonal)
-    return (rowDiff === 1 && colDiff === 0) ||
-           (rowDiff === 0 && colDiff === 1);
+    return (rowDiff === 1 && colDiff === 0) || (rowDiff === 0 && colDiff === 1);
 }
 
-/**
- * Select a gem (highlight it)
- * @param {number} row - Row position
- * @param {number} col - Column position
- */
 function selectGem(row, col) {
     selectedGem = { row, col };
-    const gemElement = getGemElement(row, col);
-    gemElement.classList.add('selected');
+    getGemElement(row, col).classList.add('selected');
 }
 
-/**
- * Deselect the currently selected gem
- */
 function deselectGem() {
     if (selectedGem) {
-        const gemElement = getGemElement(selectedGem.row, selectedGem.col);
-        gemElement.classList.remove('selected');
+        getGemElement(selectedGem.row, selectedGem.col).classList.remove('selected');
         selectedGem = null;
     }
 }
@@ -294,71 +306,56 @@ function deselectGem() {
 // SWAP LOGIC
 // ===========================================
 
-/**
- * Attempt to swap two gems
- * If the swap creates a match, process it
- * If not, swap back (invalid move)
- * @param {number} row1 - First gem row
- * @param {number} col1 - First gem column
- * @param {number} row2 - Second gem row
- * @param {number} col2 - Second gem column
- */
 async function trySwap(row1, col1, row2, col2) {
     isProcessing = true;
     deselectGem();
 
-    // Perform the swap in the grid
     swap(row1, col1, row2, col2);
-
-    // Update visual representation
     updateGemElement(row1, col1);
     updateGemElement(row2, col2);
 
-    // Check for matches
     const matches = findAllMatches();
 
     if (matches.length > 0) {
-        // Valid move - process matches
+        // Valid move - use a move
+        movesLeft--;
+        movesLeftEl.textContent = movesLeft;
+
+        // Update moves warning
+        if (movesLeft <= 3) {
+            goalMovesEl.classList.add('warning');
+        }
+
         setStatus('Nice match!');
         await processMatches(matches);
-    } else {
-        // Invalid move - swap back
-        setStatus('No match! Try again.');
 
-        // Add shake animation
+        // Check win/lose after processing
+        checkLevelEnd();
+    } else {
+        setStatus('No match! Try again.');
         getGemElement(row1, col1).classList.add('invalid');
         getGemElement(row2, col2).classList.add('invalid');
 
         await delay(CONFIG.ANIMATION_DELAY);
 
-        // Swap back
         swap(row1, col1, row2, col2);
         updateGemElement(row1, col1);
         updateGemElement(row2, col2);
 
-        // Remove shake animation
         getGemElement(row1, col1).classList.remove('invalid');
         getGemElement(row2, col2).classList.remove('invalid');
     }
 
-    // Check if there are any valid moves left
     if (!hasValidMoves()) {
         setStatus('No moves left! Shuffling...');
         await delay(500);
         shuffleBoard();
-        setStatus('Board shuffled! Keep playing!');
+        setStatus('Board shuffled!');
     }
 
     isProcessing = false;
 }
 
-/**
- * Swap two gems in the grid
- * @param {number} row1 - First gem row
- * @param {number} col1 - First gem column
- * @param {number} row2 - Second gem row
- * @param {number} col2 - Second gem column
- */
 function swap(row1, col1, row2, col2) {
     const temp = grid[row1][col1];
     grid[row1][col1] = grid[row2][col2];
@@ -369,69 +366,43 @@ function swap(row1, col1, row2, col2) {
 // MATCH DETECTION
 // ===========================================
 
-/**
- * Find all matches on the board
- * A match is 3 or more gems of the same type in a row or column
- * @returns {Array} Array of matched positions [{row, col}, ...]
- */
 function findAllMatches() {
-    const matches = new Set(); // Use Set to avoid duplicates
+    const matches = new Set();
 
-    // Check horizontal matches
+    // Horizontal
     for (let row = 0; row < CONFIG.ROWS; row++) {
         for (let col = 0; col < CONFIG.COLS - 2; col++) {
             const gemType = grid[row][col];
-
-            // Check if next 2 gems match
-            if (grid[row][col + 1] === gemType &&
-                grid[row][col + 2] === gemType) {
-
-                // Found a match! Find how far it extends
+            if (grid[row][col + 1] === gemType && grid[row][col + 2] === gemType) {
                 let matchEnd = col + 2;
-                while (matchEnd + 1 < CONFIG.COLS &&
-                       grid[row][matchEnd + 1] === gemType) {
+                while (matchEnd + 1 < CONFIG.COLS && grid[row][matchEnd + 1] === gemType) {
                     matchEnd++;
                 }
-
-                // Add all matched positions
                 for (let c = col; c <= matchEnd; c++) {
                     matches.add(`${row},${c}`);
                 }
-
-                // Skip to end of this match
                 col = matchEnd;
             }
         }
     }
 
-    // Check vertical matches
+    // Vertical
     for (let col = 0; col < CONFIG.COLS; col++) {
         for (let row = 0; row < CONFIG.ROWS - 2; row++) {
             const gemType = grid[row][col];
-
-            // Check if next 2 gems match
-            if (grid[row + 1][col] === gemType &&
-                grid[row + 2][col] === gemType) {
-
-                // Found a match! Find how far it extends
+            if (grid[row + 1][col] === gemType && grid[row + 2][col] === gemType) {
                 let matchEnd = row + 2;
-                while (matchEnd + 1 < CONFIG.ROWS &&
-                       grid[matchEnd + 1][col] === gemType) {
+                while (matchEnd + 1 < CONFIG.ROWS && grid[matchEnd + 1][col] === gemType) {
                     matchEnd++;
                 }
-
-                // Add all matched positions
                 for (let r = row; r <= matchEnd; r++) {
                     matches.add(`${r},${col}`);
                 }
-
-                // Skip to end of this match
                 row = matchEnd;
             }
         }
     }
 
-    // Convert Set back to array of objects
     return Array.from(matches).map(pos => {
         const [row, col] = pos.split(',').map(Number);
         return { row, col };
@@ -442,66 +413,76 @@ function findAllMatches() {
 // MATCH PROCESSING
 // ===========================================
 
-/**
- * Process matches: remove gems, apply gravity, fill, check for cascades
- * @param {Array} matches - Array of matched positions
- */
 async function processMatches(matches) {
     let cascadeLevel = 0;
 
     while (matches.length > 0) {
         cascadeLevel++;
 
-        // Calculate points (more for cascades!)
+        // Track collected gems
+        for (const { row, col } of matches) {
+            const gemType = grid[row][col];
+            gemsCollected[gemType] = (gemsCollected[gemType] || 0) + 1;
+            totalGemsCollected++;
+        }
+
+        // Calculate points
         const points = matches.length * CONFIG.POINTS_PER_GEM * cascadeLevel;
         updateScore(points);
 
-        // Show cascade message
         if (cascadeLevel > 1) {
             setStatus(`Cascade x${cascadeLevel}! +${points} points!`, true);
         }
 
-        // Animate matched gems
+        // Update goals display
+        updateGoalsProgress();
+
         await animateMatches(matches);
-
-        // Remove matched gems (set to -1)
         removeMatches(matches);
-
-        // Apply gravity (gems fall down)
         await applyGravity();
-
-        // Fill empty spaces with new gems
         await fillEmptySpaces();
 
-        // Check for new matches (cascade)
         matches = findAllMatches();
     }
 
     setStatus('Match 3 or more gems!');
 }
 
-/**
- * Animate matched gems (pop effect)
- * @param {Array} matches - Array of matched positions
- */
-async function animateMatches(matches) {
-    // Add matched class to all matched gems
-    for (const { row, col } of matches) {
-        const gemElement = getGemElement(row, col);
-        gemElement.classList.add('matched');
+function updateGoalsProgress() {
+    const level = LEVELS.find(l => l.id === currentLevel);
+    const goals = level.goals;
+
+    // Update score display
+    currentScoreEl.textContent = score;
+    if (goals.score && score >= goals.score) {
+        goalScoreEl.classList.add('completed');
     }
 
-    // Wait for animation to complete
+    // Update gem collection display
+    if (goals.collectGem) {
+        const collected = gemsCollected[goals.collectGem.type] || 0;
+        gemsCollectedEl.textContent = collected;
+        if (collected >= goals.collectGem.count) {
+            goalGemsEl.classList.add('completed');
+        }
+    } else if (goals.collectAny) {
+        gemsCollectedEl.textContent = totalGemsCollected;
+        if (totalGemsCollected >= goals.collectAny) {
+            goalGemsEl.classList.add('completed');
+        }
+    }
+}
+
+async function animateMatches(matches) {
+    for (const { row, col } of matches) {
+        getGemElement(row, col).classList.add('matched');
+    }
     await delay(CONFIG.ANIMATION_DELAY);
 }
 
-/**
- * Remove matched gems from the grid
- * @param {Array} matches - Array of matched positions
- */
 function removeMatches(matches) {
     for (const { row, col } of matches) {
-        grid[row][col] = -1; // -1 represents empty
+        grid[row][col] = -1;
     }
 }
 
@@ -509,22 +490,15 @@ function removeMatches(matches) {
 // GRAVITY & FILLING
 // ===========================================
 
-/**
- * Apply gravity - make gems fall into empty spaces
- */
 async function applyGravity() {
     let gemsFell = false;
 
-    // Process each column from bottom to top
     for (let col = 0; col < CONFIG.COLS; col++) {
         let emptyRow = CONFIG.ROWS - 1;
 
-        // Find empty spaces and shift gems down
         for (let row = CONFIG.ROWS - 1; row >= 0; row--) {
             if (grid[row][col] !== -1) {
-                // This cell has a gem
                 if (row !== emptyRow) {
-                    // Move gem down to empty position
                     grid[emptyRow][col] = grid[row][col];
                     grid[row][col] = -1;
                     gemsFell = true;
@@ -534,126 +508,253 @@ async function applyGravity() {
         }
     }
 
-    // Update display
     if (gemsFell) {
         renderBoard();
         await delay(CONFIG.ANIMATION_DELAY);
     }
 }
 
-/**
- * Fill empty spaces at the top with new random gems
- */
 async function fillEmptySpaces() {
     let filled = false;
 
     for (let col = 0; col < CONFIG.COLS; col++) {
         for (let row = 0; row < CONFIG.ROWS; row++) {
             if (grid[row][col] === -1) {
-                // Generate new random gem
                 grid[row][col] = Math.floor(Math.random() * CONFIG.NUM_GEM_TYPES);
                 filled = true;
             }
         }
     }
 
-    // Update display with falling animation
     if (filled) {
         renderBoard();
 
-        // Add falling animation to new gems
-        for (let col = 0; col < CONFIG.COLS; col++) {
-            for (let row = 0; row < CONFIG.ROWS; row++) {
-                const gemElement = getGemElement(row, col);
-                gemElement.classList.add('falling');
+        for (let row = 0; row < CONFIG.ROWS; row++) {
+            for (let col = 0; col < CONFIG.COLS; col++) {
+                getGemElement(row, col).classList.add('falling');
             }
         }
 
         await delay(CONFIG.ANIMATION_DELAY);
 
-        // Remove falling class
-        for (let col = 0; col < CONFIG.COLS; col++) {
-            for (let row = 0; row < CONFIG.ROWS; row++) {
-                const gemElement = getGemElement(row, col);
-                gemElement.classList.remove('falling');
+        for (let row = 0; row < CONFIG.ROWS; row++) {
+            for (let col = 0; col < CONFIG.COLS; col++) {
+                getGemElement(row, col).classList.remove('falling');
             }
         }
     }
+}
+
+// ===========================================
+// LEVEL WIN/LOSE CHECKS
+// ===========================================
+
+function checkLevelEnd() {
+    const level = LEVELS.find(l => l.id === currentLevel);
+    const goals = level.goals;
+
+    // Check if all goals are met
+    const goalsComplete = checkAllGoalsComplete(goals);
+
+    if (goalsComplete) {
+        // Level complete!
+        setTimeout(() => showLevelComplete(level), 500);
+    } else if (movesLeft <= 0) {
+        // Out of moves - check if goals were met
+        if (checkAllGoalsComplete(goals)) {
+            setTimeout(() => showLevelComplete(level), 500);
+        } else {
+            setTimeout(() => showLevelFailed(level), 500);
+        }
+    }
+}
+
+function checkAllGoalsComplete(goals) {
+    // Check score goal
+    if (goals.score && score < goals.score) {
+        return false;
+    }
+
+    // Check gem collection goals
+    if (goals.collectGem) {
+        if ((gemsCollected[goals.collectGem.type] || 0) < goals.collectGem.count) {
+            return false;
+        }
+    }
+
+    if (goals.collectGem2) {
+        if ((gemsCollected[goals.collectGem2.type] || 0) < goals.collectGem2.count) {
+            return false;
+        }
+    }
+
+    if (goals.collectGem3) {
+        if ((gemsCollected[goals.collectGem3.type] || 0) < goals.collectGem3.count) {
+            return false;
+        }
+    }
+
+    if (goals.collectAny && totalGemsCollected < goals.collectAny) {
+        return false;
+    }
+
+    return true;
+}
+
+function calculateStars(level) {
+    const thresholds = level.starThresholds;
+    let stars = 0;
+
+    if (score >= thresholds[0]) stars = 1;
+    if (score >= thresholds[1]) stars = 2;
+    if (score >= thresholds[2]) stars = 3;
+
+    return stars;
+}
+
+// ===========================================
+// MODALS
+// ===========================================
+
+function showLevelComplete(level) {
+    const stars = calculateStars(level);
+    const movesUsed = totalMoves - movesLeft;
+
+    // Update progress
+    const existingProgress = levelProgress[level.id] || {};
+    levelProgress[level.id] = {
+        completed: true,
+        stars: Math.max(existingProgress.stars || 0, stars),
+        bestScore: Math.max(existingProgress.bestScore || 0, score)
+    };
+    saveProgress();
+
+    // Update modal
+    document.getElementById('final-score').textContent = score;
+    document.getElementById('moves-used').textContent = movesUsed;
+
+    // Update stars display
+    const starsContainer = document.getElementById('stars');
+    const starElements = starsContainer.querySelectorAll('.star');
+    starElements.forEach((star, index) => {
+        star.classList.remove('earned');
+        if (index < stars) {
+            setTimeout(() => star.classList.add('earned'), index * 300);
+        }
+    });
+
+    // Show/hide next level button
+    const nextBtn = document.getElementById('next-level-btn');
+    if (currentLevel < LEVELS.length) {
+        nextBtn.style.display = 'block';
+    } else {
+        nextBtn.style.display = 'none';
+    }
+
+    levelCompleteModal.classList.remove('hidden');
+}
+
+function showLevelFailed(level) {
+    document.getElementById('failed-score').textContent = score;
+    document.getElementById('failed-target').textContent = level.goals.score || 'N/A';
+
+    levelFailedModal.classList.remove('hidden');
+}
+
+function showLevelSelect() {
+    const levelGrid = document.getElementById('level-grid');
+    levelGrid.innerHTML = '';
+
+    LEVELS.forEach(level => {
+        const btn = document.createElement('button');
+        btn.className = 'level-btn';
+
+        const unlocked = isLevelUnlocked(level.id);
+        const progress = levelProgress[level.id];
+
+        if (unlocked) {
+            btn.classList.add('unlocked');
+            if (progress?.completed) {
+                btn.classList.add('completed');
+            }
+            if (level.id === currentLevel) {
+                btn.classList.add('current');
+            }
+
+            btn.innerHTML = `
+                <span>${level.id}</span>
+                ${progress?.stars ? `<span class="level-stars">${'⭐'.repeat(progress.stars)}</span>` : ''}
+            `;
+
+            btn.addEventListener('click', () => {
+                loadLevel(level.id);
+                levelSelectModal.classList.add('hidden');
+            });
+        } else {
+            btn.classList.add('locked');
+            btn.innerHTML = `<span>🔒</span>`;
+        }
+
+        levelGrid.appendChild(btn);
+    });
+
+    levelSelectModal.classList.remove('hidden');
+}
+
+function hideAllModals() {
+    levelCompleteModal.classList.add('hidden');
+    levelFailedModal.classList.add('hidden');
+    levelSelectModal.classList.add('hidden');
+    goalScoreEl.classList.remove('completed');
+    goalGemsEl.classList.remove('completed');
+    goalMovesEl.classList.remove('warning');
 }
 
 // ===========================================
 // VALID MOVES CHECK
 // ===========================================
 
-/**
- * Check if there are any valid moves left on the board
- * @returns {boolean} True if at least one valid move exists
- */
 function hasValidMoves() {
     for (let row = 0; row < CONFIG.ROWS; row++) {
         for (let col = 0; col < CONFIG.COLS; col++) {
-            // Try swapping with right neighbor
             if (col < CONFIG.COLS - 1) {
                 swap(row, col, row, col + 1);
                 const hasMatch = findAllMatches().length > 0;
-                swap(row, col, row, col + 1); // Undo
-
+                swap(row, col, row, col + 1);
                 if (hasMatch) return true;
             }
-
-            // Try swapping with bottom neighbor
             if (row < CONFIG.ROWS - 1) {
                 swap(row, col, row + 1, col);
                 const hasMatch = findAllMatches().length > 0;
-                swap(row, col, row + 1, col); // Undo
-
+                swap(row, col, row + 1, col);
                 if (hasMatch) return true;
             }
         }
     }
-
     return false;
 }
 
-/**
- * Find one valid move (for hint system)
- * @returns {Object|null} {row1, col1, row2, col2} or null if no moves
- */
 function findValidMove() {
     for (let row = 0; row < CONFIG.ROWS; row++) {
         for (let col = 0; col < CONFIG.COLS; col++) {
-            // Try swapping with right neighbor
             if (col < CONFIG.COLS - 1) {
                 swap(row, col, row, col + 1);
                 const hasMatch = findAllMatches().length > 0;
-                swap(row, col, row, col + 1); // Undo
-
-                if (hasMatch) {
-                    return { row1: row, col1: col, row2: row, col2: col + 1 };
-                }
+                swap(row, col, row, col + 1);
+                if (hasMatch) return { row1: row, col1: col, row2: row, col2: col + 1 };
             }
-
-            // Try swapping with bottom neighbor
             if (row < CONFIG.ROWS - 1) {
                 swap(row, col, row + 1, col);
                 const hasMatch = findAllMatches().length > 0;
-                swap(row, col, row + 1, col); // Undo
-
-                if (hasMatch) {
-                    return { row1: row, col1: col, row2: row + 1, col2: col };
-                }
+                swap(row, col, row + 1, col);
+                if (hasMatch) return { row1: row, col1: col, row2: row + 1, col2: col };
             }
         }
     }
-
     return null;
 }
 
-/**
- * Shuffle the board when no valid moves exist
- */
 function shuffleBoard() {
-    // Collect all gem types
     const gems = [];
     for (let row = 0; row < CONFIG.ROWS; row++) {
         for (let col = 0; col < CONFIG.COLS; col++) {
@@ -661,13 +762,11 @@ function shuffleBoard() {
         }
     }
 
-    // Shuffle using Fisher-Yates algorithm
     for (let i = gems.length - 1; i > 0; i--) {
         const j = Math.floor(Math.random() * (i + 1));
         [gems[i], gems[j]] = [gems[j], gems[i]];
     }
 
-    // Put gems back in grid
     let index = 0;
     for (let row = 0; row < CONFIG.ROWS; row++) {
         for (let col = 0; col < CONFIG.COLS; col++) {
@@ -675,10 +774,8 @@ function shuffleBoard() {
         }
     }
 
-    // Render the new board
     renderBoard();
 
-    // If still no valid moves, try again (rare but possible)
     if (!hasValidMoves()) {
         shuffleBoard();
     }
@@ -688,77 +785,43 @@ function shuffleBoard() {
 // HINT SYSTEM
 // ===========================================
 
-/**
- * Show a hint by highlighting a valid move
- */
 function showHint() {
     if (isProcessing) return;
-
     clearHint();
 
     const move = findValidMove();
     if (move) {
-        const gem1 = getGemElement(move.row1, move.col1);
-        const gem2 = getGemElement(move.row2, move.col2);
-
-        gem1.classList.add('hint');
-        gem2.classList.add('hint');
-
-        // Auto-clear hint after 2 seconds
+        getGemElement(move.row1, move.col1).classList.add('hint');
+        getGemElement(move.row2, move.col2).classList.add('hint');
         hintTimeout = setTimeout(clearHint, 2000);
     }
 }
 
-/**
- * Clear the hint animation
- */
 function clearHint() {
     if (hintTimeout) {
         clearTimeout(hintTimeout);
         hintTimeout = null;
     }
-
-    // Remove hint class from all gems
-    const hints = document.querySelectorAll('.gem.hint');
-    hints.forEach(gem => gem.classList.remove('hint'));
+    document.querySelectorAll('.gem.hint').forEach(gem => gem.classList.remove('hint'));
 }
 
 // ===========================================
 // SCORING & UI
 // ===========================================
 
-/**
- * Update the score display
- * @param {number} points - Points to add
- */
 function updateScore(points) {
     score += points;
     scoreElement.textContent = score;
 }
 
-/**
- * Set the status message
- * @param {string} message - Message to display
- * @param {boolean} isCascade - Whether this is a cascade message
- */
 function setStatus(message, isCascade = false) {
     statusElement.textContent = message;
-
     if (isCascade) {
         statusElement.classList.add('cascade');
         setTimeout(() => statusElement.classList.remove('cascade'), 500);
     }
 }
 
-// ===========================================
-// UTILITY FUNCTIONS
-// ===========================================
-
-/**
- * Promise-based delay function
- * @param {number} ms - Milliseconds to wait
- * @returns {Promise} Resolves after delay
- */
 function delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -767,17 +830,36 @@ function delay(ms) {
 // EVENT LISTENERS
 // ===========================================
 
-// New Game button
-newGameBtn.addEventListener('click', initGame);
-
-// Hint button
+levelsBtn.addEventListener('click', showLevelSelect);
 hintBtn.addEventListener('click', showHint);
+restartBtn.addEventListener('click', () => loadLevel(currentLevel));
+
+// Level Complete Modal buttons
+document.getElementById('next-level-btn').addEventListener('click', () => {
+    if (currentLevel < LEVELS.length) {
+        loadLevel(currentLevel + 1);
+    }
+});
+document.getElementById('modal-levels-btn').addEventListener('click', () => {
+    hideAllModals();
+    showLevelSelect();
+});
+
+// Level Failed Modal buttons
+document.getElementById('retry-btn').addEventListener('click', () => loadLevel(currentLevel));
+document.getElementById('failed-levels-btn').addEventListener('click', () => {
+    hideAllModals();
+    showLevelSelect();
+});
+
+// Level Select Modal close
+document.getElementById('close-levels-btn').addEventListener('click', () => {
+    levelSelectModal.classList.add('hidden');
+});
 
 // ===========================================
 // START THE GAME
 // ===========================================
 
-// Initialize when page loads
 initGame();
-
-console.log('Gem Garden loaded! Enjoy the game!');
+console.log('Gem Garden loaded with Level System!');
